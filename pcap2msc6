@@ -1,0 +1,150 @@
+#!/usr/bin/python2.7
+
+# $Id: pcap2msc6 2014-02-28 23:36:03 cesar olvera $
+
+# This script is a modification and enhancement of two scripts:
+
+# 1. pcap2msc (http://code.google.com/p/pcap2msc/) which transforms
+# pcap files into mscgen-compatible file, but that doesn't parse IPv6.
+
+# 2. pcap2z120.py (http://www.fi.muni.cz/~xrehak/) which parses IPv6,
+# but doesn't produce a mscgen-compatible file.
+
+# Then based on pcap2msc, there is added the part that parses IPv6
+# from pcap2z120.py. Also is added the parse for IPv6 unspecified address (::).
+
+# The script uses tshark for inputs, and the outputs can be used by mscgen.
+
+# Code License: GPL v2
+# contact: colvera31416 at gmail dot com
+
+import sys
+import subprocess
+import re
+
+def usage():
+  print >>sys.stderr, '%s: <.pcap> [tshark additional options] "wireshark display filter"' % sys.argv[0]
+  sys.exit(1)
+
+n = len(sys.argv)
+if n < 3:
+  usage()
+
+capture = sys.argv[1]
+dfilter = sys.argv[-1]
+
+tshark_cmd = [ 'tshark', '-n' ]
+tshark_cmd.extend(sys.argv[2:-1])
+tshark_cmd.append('-r')
+tshark_cmd.append(sys.argv[1])
+tshark_cmd.append(sys.argv[-1])
+
+# start tshark subprocess and prepare a pipe to which it will write stdout
+shark = subprocess.Popen(tshark_cmd, stdout=subprocess.PIPE)
+sharkout = shark.stdout
+
+# list of messages displayed by tshark
+messages = []
+firstline = True
+
+while True:
+  ipv6 = False
+  line = sharkout.readline()
+  # guard in the case tshark's protocol filter doesn't produce packets
+  if len(line) == 0 and firstline == True:
+    print("msc {")
+    print "  tshark's protocol filter doesn't produce packets"
+    print("}")
+  firstline = False
+  # eof encountered
+  if len(line) == 0:
+    break
+
+  # IPv4 trafic
+  regex = re.compile('^ *(\d+) +(\d+\.\d+) +(\d+\.\d+\.\d+\.\d+) -> (\d+\.\d+\.\d+\.\d+) (.*?)$')
+  ret = regex.match(line)
+
+  # IPv6 trafic
+  if ret == None:
+    regex = re.compile('^ *(\d+) +(\d+\.\d+) +((\w+\:\:?)+\w+) -> ((\w+\:\:?)+\w+) (.*?)$')
+    ret = regex.match(line)
+    
+    # case of IPv6 unspecified address (::) 
+    if ret == None:
+      regex = re.compile('^ *(\d+) +(\d+\.\d+) +((\W+\:\:?)) -> ((\w+\:\:?)+\w+) (.*?)$')
+      ret = regex.match(line)
+
+    ipv6 = True
+
+  if ret != None:
+    msg = {}
+    msg['num'] = ret.group(1)
+    msg['date'] = ret.group(2)
+
+    if ipv6:
+      msg['src'] = "\'" + ret.group(3) + "\'"
+      msg['dst'] = "\'" + ret.group(5) + "\'"
+      mesg = ret.group(7).lstrip().rstrip()
+    else:
+      msg['src'] = ret.group(3)
+      msg['dst'] = ret.group(4)
+      mesg = ret.group(5).lstrip().rstrip()
+
+    msg['msg'] = mesg
+    messages.append(msg)
+  else:
+    print >>sys.stderr, "line '%s' not handled by regex !" % line
+    break
+
+# synchronously wait for tshark termination
+shark.wait()
+if shark.returncode != 0:
+  print >>sys.stderr, "tshark returned error code %d" % shark.returncode
+  sys.exit(1)
+
+# list of entity
+# contains IP addresses used IP datagrams exchanged in this capture
+entities = []
+for msg in messages:
+  if msg['src'] not in entities:
+    entities.append(msg['src'])
+  if msg['dst'] not in entities:
+    entities.append(msg['dst'])
+
+if len(entities) == 0:
+  sys.exit(1)
+
+# print msc generated file on stdout
+print("msc {")
+
+# dots are not allowed in entity grammar (see mscgen grammar)
+# thus, name IP address by u%d, where %d is replaced by their index in the list
+
+# entities
+line = ''
+for i in range(0, len(entities)):
+  line += 'u%d[label=\"\"]' % (i)
+  if i < len(entities)-1:
+    line += ','
+print("  %s;" % line)
+
+# rboxes with labels
+line = ''
+for i in range(0, len(entities)):
+  line += 'u%d rbox u%d[label=\"%s\"]' % (i,i,entities[i])
+  if i < len(entities)-1:
+    line += ','
+print("  %s;" % line)
+
+# add messages
+# a message is an arrow between src and dst (IP addresses)
+# and a label which is the line used by tshark to describe packet content
+for msg in messages:
+  src = entities.index(msg['src'])
+  dst = entities.index(msg['dst'])
+  if src < dst:
+    print("  u%d=>u%d [ label = \"%s\" ] ;" % (src, dst, msg['msg']))
+  else:
+    print("  u%d<=u%d [ label = \"%s\" ] ;" % (dst, src, msg['msg']))
+
+print("}")
